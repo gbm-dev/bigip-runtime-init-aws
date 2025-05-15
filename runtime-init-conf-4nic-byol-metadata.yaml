@@ -1,0 +1,294 @@
+---
+controls:
+  logLevel: info
+  logFilename: /var/log/cloud/bigIpRuntimeInit.log
+
+pre_onboard_enabled:
+  - name: provision_rest
+    type: inline
+    commands:
+      - /usr/bin/setdb provision.extramb 1000
+      - /usr/bin/setdb restjavad.useextramb true
+      - /usr/bin/setdb provision.restjavad.extramb 1000
+      - /usr/bin/setdb iapplxrpm.timeout 300
+      - /usr/bin/setdb icrd.timeout 180
+      - /usr/bin/setdb restjavad.timeout 180
+      - /usr/bin/setdb restnoded.timeout 180
+
+extension_packages:
+  install_operations:
+    - extensionType: do
+      extensionVersion: 1.46.0
+      extensionHash: 9f30ed6e271d89f9a80ec4e4f189427071f023e45a4a01efc95a340f56350cbc
+    - extensionType: as3
+      extensionVersion: 3.54.0
+      extensionHash: 0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5
+    - extensionType: cf
+      extensionVersion: 2.1.3
+      extensionHash: a699004f03b5f7b8e918921b8c3a65b1441202466c9371659abbe2e8bab025d6
+
+extension_services:
+  service_operations:
+    # First DO declaration - Basic system config and network setup
+    - extensionType: do
+      type: inline
+      value:
+        schemaVersion: 1.0.0
+        class: Device
+        async: true
+        label: Failover 4NIC BIG-IP declaration for Declarative Onboarding with BYOL license
+        Common:
+          class: Tenant
+          My_DbVariables:
+            class: DbVariables
+            config.allow.rfc3927: enable
+            provision.extramb: 1000
+            provision.restjavad.extramb: 1000
+            ui.advisory.enabled: true
+            ui.advisory.color: blue
+            ui.advisory.text: BIGIP in AWS
+            dhclient.mgmt: disable
+          My_Ntp:
+            class: NTP
+            servers:
+              - 169.254.169.123
+            timezone: UTC
+          My_Dns:
+            class: DNS
+            nameServers:
+              - 169.254.169.253
+          My_System:
+            class: System
+            hostname: "{{{HOST_NAME}}}"
+            cliInactivityTimeout: 1200
+            autoPhonehome: false
+          My_License:
+            class: License
+            licenseType: regKey
+            regKey: "{{{LICENSE_KEY}}}"
+          admin:
+            class: User
+            userType: regular
+            password: "{{{BIGIP_PASSWORD}}}"
+            shell: bash
+          # External VLAN and Self IP configuration
+          external:
+            class: VLAN
+            tag: 4094
+            mtu: 1500
+            interfaces:
+              - name: '1.1'
+                tagged: false
+          external-self:
+            class: SelfIp
+            address: "{{{SELF_IP_EXTERNAL}}}"
+            vlan: external
+            allowService:
+              - tcp:443
+              - udp:1026
+              - tcp:4353
+              - tcp:6123
+              - tcp:6124
+              - tcp:6125
+              - tcp:6126
+              - tcp:6127
+              - tcp:6128
+            trafficGroup: traffic-group-local-only
+          # Internal VLAN and Self IP configuration
+          internal:
+            class: VLAN
+            interfaces:
+              - name: '1.2'
+                tagged: false
+            mtu: 1500
+            tag: 4093
+          internal-self:
+            class: SelfIp
+            address: "{{{SELF_IP_INTERNAL}}}"
+            allowService: default
+            trafficGroup: traffic-group-local-only
+            vlan: internal
+          # Additional (4th NIC) VLAN and Self IP configuration
+          additional:
+            class: VLAN
+            interfaces:
+              - name: '1.3'
+                tagged: false
+            mtu: 1500
+            tag: 4092
+          additional-self:
+            class: SelfIp
+            address: "{{{SELF_IP_ADDITIONAL}}}"
+            allowService: default
+            trafficGroup: traffic-group-local-only
+            vlan: additional
+          # Default route configuration
+          default:
+            class: Route
+            gw: "{{{DEFAULT_GW}}}"
+            network: default
+            mtu: 1500
+            localOnly: true
+            
+    # CFE configuration
+    - extensionType: cf
+      type: inline
+      value:
+        schemaVersion: 1.0.0
+        class: Cloud_Failover
+        environment: aws
+        controls:
+          class: Controls
+          logLevel: silly
+        externalStorage:
+          encryption:
+            serverSide:
+              enabled: true
+              algorithm: AES256
+          scopingTags:
+            f5_cloud_failover_label: "{{{FAILOVER_TAG}}}"
+        failoverAddresses:
+          enabled: true
+          scopingTags:
+            f5_cloud_failover_label: "{{{FAILOVER_TAG}}}"
+          requireScopingTags: false
+        failoverRoutes:
+          enabled: true
+          scopingTags:
+            f5_cloud_failover_label: "{{{FAILOVER_TAG}}}"
+          defaultNextHopAddresses:
+            discoveryType: static
+            items:
+              - "{{{SELF_IP_EXTERNAL_NO_MASK}}}"
+              - "{{{PEER_SELF_IP_EXTERNAL}}}"
+              
+    # Second DO declaration - HA configuration
+    - extensionType: do
+      type: inline
+      value:
+        schemaVersion: 1.0.0
+        class: Device
+        async: true
+        label: Failover 4NIC BIG-IP declaration for Declarative Onboarding Device Trust
+        Common:
+          class: Tenant
+          configSync:
+            class: ConfigSync
+            configsyncIp: "/Common/internal-self/address"
+          failoverAddress:
+            class: FailoverUnicast
+            address: "/Common/internal-self/address"
+          failoverGroup:
+            class: DeviceGroup
+            type: sync-failover
+            members:
+              - "{{{HOST_NAME}}}"
+              - "{{{REMOTE_HOST_NAME}}}"
+            autoSync: true
+            saveOnAutoSync: false
+            networkFailover: true
+            fullLoadOnSync: false
+            asmSync: false
+          trust:
+            class: DeviceTrust
+            localUsername: admin
+            localPassword: "{{{BIGIP_PASSWORD}}}"
+            remoteHost: "{{{REMOTE_HOST}}}"
+            remoteUsername: admin
+            remotePassword: "{{{BIGIP_PASSWORD}}}"
+
+post_onboard_enabled:
+  - name: misc_config
+    type: inline
+    commands:
+      - tmsh modify sys global-settings gui-setup disabled
+      - tmsh save sys config
+
+runtime_parameters:
+  # Authentication parameters
+  - name: SECRET_ID
+    type: url
+    value: file:///config/cloud/secret_id
+  - name: BIGIP_PASSWORD
+    type: secret
+    secretProvider:
+      environment: aws
+      secretId: "{{{SECRET_ID}}}"
+      type: SecretsManager
+      version: AWSCURRENT
+  - name: LICENSE_KEY
+    type: tag
+    tagProvider:
+      environment: aws
+      key: licenseKey
+      
+  # Host identification parameters  
+  - name: HOST_NAME
+    type: tag
+    tagProvider:
+      environment: aws
+      key: hostname
+  - name: REMOTE_HOST_NAME
+    type: tag
+    tagProvider:
+      environment: aws
+      key: bigIpPeerHostname
+  - name: REMOTE_HOST
+    type: tag
+    tagProvider:
+      environment: aws
+      key: bigIpPeerAddr
+  - name: FAILOVER_TAG
+    type: tag
+    tagProvider:
+      environment: aws
+      key: failoverTag
+      
+  # Network configuration parameters
+  - name: SELF_IP_EXTERNAL
+    type: metadata
+    metadataProvider:
+      environment: aws
+      type: network
+      field: local-ipv4s
+      index: 1
+      ipcalc: address
+      ipcalcSize: 24
+  - name: SELF_IP_EXTERNAL_NO_MASK
+    type: metadata
+    metadataProvider:
+      environment: aws
+      type: network
+      field: local-ipv4s
+      index: 1
+  - name: PEER_SELF_IP_EXTERNAL
+    type: tag
+    tagProvider:
+      environment: aws
+      key: peerExternalSelfIp
+  - name: SELF_IP_INTERNAL
+    type: metadata
+    metadataProvider:
+      type: network
+      environment: aws
+      field: local-ipv4s
+      index: 2
+      ipcalc: address
+      ipcalcSize: 24
+  - name: SELF_IP_ADDITIONAL
+    type: metadata
+    metadataProvider:
+      type: network
+      environment: aws
+      field: local-ipv4s
+      index: 3
+      ipcalc: address
+      ipcalcSize: 24
+  - name: DEFAULT_GW
+    type: metadata
+    metadataProvider:
+      environment: aws
+      type: network
+      field: local-ipv4s
+      index: 1
+      ipcalc: first
