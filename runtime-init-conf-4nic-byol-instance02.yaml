@@ -1,0 +1,205 @@
+---
+runtime_parameters:
+  - name: USER_NAME
+    type: static
+    value: admin
+  - name: HOST_NAME 
+    type: metadata
+    metadataProvider: 
+      type: compute
+      environment: aws
+      field: hostname
+  - name: ADMIN_PASS
+    type: secret
+    secretProvider:
+      type: SecretsManager
+      environment: aws
+      secretId: '{{{SECRET_ID}}}'
+      secretKey: password
+      version: AWSCURRENT
+  - name: BIGIP_LICENSE
+    type: static
+    value: '{{{LICENSE_KEY}}}'
+  - name: BIGIP_PEER_ADDR
+    type: static
+    value: '{{{BIGIP_PEER_ADDR}}}'
+  - name: BIGIP_PEER_HOSTNAME
+    type: static
+    value: '{{{BIGIP_PEER_HOSTNAME}}}'
+  # IP Address variables
+  - name: EXTERNAL_SELF_IP
+    type: static
+    value: '{{{EXTERNAL_SELF_IP}}}'
+  - name: INTERNAL_SELF_IP
+    type: static
+    value: '{{{INTERNAL_SELF_IP}}}'
+  - name: ADDITIONAL_SELF_IP
+    type: static
+    value: '{{{ADDITIONAL_SELF_IP}}}'
+  - name: VIP_1
+    type: static
+    value: '{{{VIP_1}}}'
+  - name: VIP_2
+    type: static
+    value: '{{{VIP_2}}}'
+
+pre_onboard_enabled:
+  - name: provision_rest
+    type: inline
+    commands:
+      - /usr/bin/setdb provision.extramb 1000
+      - /usr/bin/setdb restjavad.useextramb true
+      - /usr/bin/setdb provision.restjavad.extramb 1000
+      - /usr/bin/setdb iapplxrpm.timeout 300
+      - /usr/bin/setdb icrd.timeout 180
+      - /usr/bin/setdb restjavad.timeout 180
+      - /usr/bin/setdb restnoded.timeout 180
+
+extension_packages:
+  install_operations:
+    - extensionType: do
+      extensionVersion: 1.46.0
+      extensionHash: 9f30ed6e271d89f9a80ec4e4f189427071f023e45a4a01efc95a340f56350cbc
+    - extensionType: as3
+      extensionVersion: 3.54.0
+      extensionHash: 0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5
+    - extensionType: cf
+      extensionVersion: 2.1.3
+      extensionHash: a699004f03b5f7b8e918921b8c3a65b1441202466c9371659abbe2e8bab025d6
+
+extension_services:
+  service_operations:
+    - extensionType: do
+      type: inline
+      value:
+        schemaVersion: 1.0.0
+        class: Device
+        async: true
+        label: BIG-IP 4 NIC BYOL declaration for Declarative Onboarding with CFE
+        Common:
+          class: Tenant
+          dbVars:
+            class: DbVariables
+            provision.extramb: 1000
+            provision.restjavad.extramb: 1000
+            ui.advisory.enabled: true
+            ui.advisory.color: blue
+            ui.advisory.text: BIGIP in AWS
+            config.allow.rfc3927: enable
+            dhclient.mgmt: disable
+          mySystem:
+            class: System
+            hostname: '{{{HOST_NAME}}}'
+            cliInactivityTimeout: 1200
+            autoPhonehome: false
+          myLicense:
+            class: License
+            licenseType: regKey
+            regKey: '{{{BIGIP_LICENSE}}}'
+          myDns:
+            class: DNS
+            nameServers:
+              - 169.254.169.253
+          myNtp:
+            class: NTP
+            servers:
+              - 169.254.169.123
+            timezone: UTC
+          admin:
+            class: User
+            userType: regular
+            password: '{{{ADMIN_PASS}}}'
+            shell: bash
+          external:
+            class: VLAN
+            tag: 4094
+            mtu: 1500
+            interfaces:
+              - name: '1.1'
+                tagged: false
+          external-localself:
+            class: SelfIp
+            address: '{{{EXTERNAL_SELF_IP}}}/24'
+            vlan: external
+            allowService: default
+            trafficGroup: traffic-group-local-only
+          internal:
+            class: VLAN
+            tag: 4093
+            mtu: 1500
+            interfaces:
+              - name: '1.2'
+                tagged: false
+          internal-localself:
+            class: SelfIp
+            address: '{{{INTERNAL_SELF_IP}}}/24'
+            vlan: internal
+            allowService: default
+            trafficGroup: traffic-group-local-only
+          additional:
+            class: VLAN
+            tag: 4092
+            mtu: 1500
+            interfaces:
+              - name: '1.3'
+                tagged: false
+          additional-localself:
+            class: SelfIp
+            address: '{{{ADDITIONAL_SELF_IP}}}/24'
+            vlan: additional
+            allowService: default
+            trafficGroup: traffic-group-local-only
+          configsync:
+            class: ConfigSync
+            configsyncIp: /Common/internal-localself/address
+          failoverAddress:
+            class: FailoverUnicast
+            address: /Common/internal-localself/address
+          failoverGroup:
+            class: DeviceGroup
+            type: sync-failover
+            members:
+              - '{{{HOST_NAME}}}'
+              - '{{{BIGIP_PEER_HOSTNAME}}}'
+            autoSync: true
+            saveOnAutoSync: false
+            networkFailover: true
+            fullLoadOnSync: false
+            asmSync: false
+          trust:
+            class: DeviceTrust
+            localUsername: admin
+            localPassword: '{{{ADMIN_PASS}}}'
+            remoteHost: '{{{BIGIP_PEER_ADDR}}}'
+            remoteUsername: admin
+            remotePassword: '{{{ADMIN_PASS}}}'
+
+    - extensionType: cf
+      type: inline
+      value:
+        schemaVersion: 1.0.0
+        class: Cloud_Failover
+        environment: aws
+        externalStorage:
+          scopingTags:
+            f5_cloud_failover_label: bigip_high_availability_solution
+        failoverAddresses:
+          enabled: true
+          scopingTags:
+            f5_cloud_failover_label: bigip_high_availability_solution
+        failoverRoutes:
+          enabled: true
+          scopingTags:
+            f5_cloud_failover_label: bigip_high_availability_solution
+          defaultNextHopAddresses:
+            discoveryType: static
+            items:
+              - '{{{VIP_1}}}'
+              - '{{{VIP_2}}}'
+
+post_onboard_enabled:
+  - name: misc_config
+    type: inline
+    commands:
+      - tmsh modify sys global-settings gui-setup disabled
+      - tmsh save sys config
